@@ -161,6 +161,14 @@ def test_cli_launch_subcommand_keeps_helper_server_alive_after_injection(monkeyp
     assert len(calls) == 1
 
 
+def test_cli_default_db_path_uses_codex_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "profile-home"))
+
+    args = cli.build_parser().parse_args(["launch"])
+
+    assert args.db == tmp_path / "profile-home" / "state_5.sqlite"
+
+
 def test_cli_install_dispatches_to_platform_installer(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cli, "install_codex_plus_plus", lambda options: calls.append(options))

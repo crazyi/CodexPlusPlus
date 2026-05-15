@@ -26,7 +26,7 @@
   const codexDeleteStyleVersion = "8";
   const codexPlusMenuId = "codex-plus-menu";
   const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
-  const codexDeleteVersion = "6";
+  const codexDeleteVersion = "7";
   const codexExportVersion = "1";
   const codexProjectMoveVersion = "1";
   const codexActionGroupVersion = "2";
@@ -2113,6 +2113,17 @@
     }
   }
 
+  function isThreadMissingResult(result) {
+    const message = String(result?.message || "");
+    return result?.status === "failed" && message.includes("Thread not found in local storage");
+  }
+
+  async function removeOrphanedProjectedRow(row, button, ref) {
+    await setProjectlessThreadIds(ref, "remove").catch(() => {});
+    await clearThreadWorkspaceHints(ref).catch(() => {});
+    removeDeletedRow(row, button, ref);
+  }
+
   function updateDeleteButtonOffsets() {
     sessionRows().forEach((row) => {
       const hasArchiveConfirm = Array.from(row.querySelectorAll("button")).some((button) => {
@@ -2138,6 +2149,9 @@
       if (result.status === "server_deleted" || result.status === "local_deleted") {
         removeDeletedRow(row, button, ref);
         showToast(result.message || "删除成功", result.undo_token);
+      } else if (isThreadMissingResult(result)) {
+        await removeOrphanedProjectedRow(row, button, ref);
+        showToast("已移除本地列表中的失效会话", null);
       } else {
         showToast(result.message || "删除失败", null);
       }

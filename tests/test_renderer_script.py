@@ -396,7 +396,7 @@ def test_renderer_script_toast_does_not_capture_page_interactions():
 def test_renderer_script_sidebar_delete_opens_on_pointerup_when_click_is_unreliable():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
     assert "openDeleteConfirm" in text
-    assert "codexDeleteVersion = \"6\"" in text
+    assert "codexDeleteVersion = \"7\"" in text
     assert "actionGroupFromRow" in text
     assert "removeActionGroups(row)" in text
     assert "row.dataset.codexDeleteRow = \"false\"" in text
@@ -405,6 +405,16 @@ def test_renderer_script_sidebar_delete_opens_on_pointerup_when_click_is_unrelia
     assert "document.addEventListener(\"pointerup\", handler, true)" in text
     assert "document.addEventListener(\"click\", handler, true)" in text
     assert "deleteButton.dataset.codexDeleteVersion = codexDeleteVersion" in text
+
+
+def test_renderer_script_removes_orphaned_projected_rows_when_thread_is_missing():
+    text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
+    assert "function isThreadMissingResult" in text
+    assert "Thread not found in local storage" in text
+    assert "function removeOrphanedProjectedRow" in text
+    assert "setProjectlessThreadIds(ref, \"remove\")" in text
+    assert "clearThreadWorkspaceHints(ref)" in text
+    assert "已移除本地列表中的失效会话" in text
 
 
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")

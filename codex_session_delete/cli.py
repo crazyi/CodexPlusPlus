@@ -14,9 +14,18 @@ from codex_session_delete import updater
 from codex_session_delete import watcher
 
 
+def codex_home() -> Path:
+    configured = os.environ.get("CODEX_HOME")
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+
+def default_db_path() -> Path:
+    return codex_home() / "state_5.sqlite"
+
+
 def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--app-dir", type=Path, default=None)
-    parser.add_argument("--db", type=Path, default=Path.home() / ".codex" / "state_5.sqlite", help="SQLite database path for local deletion fallback")
+    parser.add_argument("--db", type=Path, default=default_db_path(), help="SQLite database path for local deletion fallback")
     parser.add_argument("--backup-dir", type=Path, default=Path.home() / ".codex-session-delete" / "backups")
     parser.add_argument("--debug-port", type=int, default=9229)
     parser.add_argument("--helper-port", type=int, default=57321)
