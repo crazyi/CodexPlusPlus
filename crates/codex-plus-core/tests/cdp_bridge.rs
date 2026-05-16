@@ -241,6 +241,65 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
 }
 
 #[tokio::test]
+async fn install_bridge_immediately_evaluates_new_document_scripts() {
+    let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
+        for expected_id in 1..=5 {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["id"], expected_id);
+            send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
+        }
+
+        let add_main = recv_json(&mut socket).await;
+        assert_eq!(add_main["method"], "Page.addScriptToEvaluateOnNewDocument");
+        assert_eq!(add_main["params"]["source"], "window.mainInjected = true;");
+        send_json(&mut socket, json!({ "id": add_main["id"], "result": {} })).await;
+
+        let eval_main = recv_json(&mut socket).await;
+        assert_eq!(eval_main["method"], "Runtime.evaluate");
+        assert_eq!(
+            eval_main["params"]["expression"],
+            "window.mainInjected = true;"
+        );
+        send_json(&mut socket, json!({ "id": eval_main["id"], "result": {} })).await;
+
+        let add_user = recv_json(&mut socket).await;
+        assert_eq!(add_user["method"], "Page.addScriptToEvaluateOnNewDocument");
+        assert_eq!(add_user["params"]["source"], "window.userInjected = true;");
+        send_json(&mut socket, json!({ "id": add_user["id"], "result": {} })).await;
+
+        let eval_user = recv_json(&mut socket).await;
+        assert_eq!(eval_user["method"], "Runtime.evaluate");
+        assert_eq!(
+            eval_user["params"]["expression"],
+            "window.userInjected = true;"
+        );
+        send_json(&mut socket, json!({ "id": eval_user["id"], "result": {} })).await;
+
+        close_socket(&mut socket).await;
+    })
+    .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        bridge::install_bridge(
+            &url,
+            BRIDGE_BINDING_NAME,
+            noop_handler(),
+            &[
+                "window.mainInjected = true;".to_string(),
+                "window.userInjected = true;".to_string(),
+            ],
+        ),
+    )
+    .await
+    .expect("bridge should not hang while evaluating new document scripts")
+    .expect("bridge should evaluate new document scripts immediately");
+    request_rx
+        .await
+        .expect("server task should finish without panicking");
+}
+
+#[tokio::test]
 async fn install_bridge_command_error_mentions_method_and_id() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
         let command = recv_json(&mut socket).await;

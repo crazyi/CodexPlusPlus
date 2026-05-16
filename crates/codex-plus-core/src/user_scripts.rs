@@ -1,16 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserScriptConfig {
-    #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default)]
     pub scripts: BTreeMap<String, bool>,
 }
 
@@ -28,6 +27,7 @@ pub struct UserScriptManager {
     builtin_dir: PathBuf,
     user_dir: PathBuf,
     config_path: PathBuf,
+    config_lock: Arc<Mutex<()>>,
 }
 
 impl UserScriptManager {
@@ -40,17 +40,31 @@ impl UserScriptManager {
             builtin_dir: builtin_dir.into(),
             user_dir: user_dir.into(),
             config_path: config_path.into(),
+            config_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn load_config(&self) -> UserScriptConfig {
+        let _guard = self.config_lock.lock().unwrap();
+        self.load_config_unlocked()
+    }
+
+    fn load_config_unlocked(&self) -> UserScriptConfig {
         let Ok(text) = fs::read_to_string(&self.config_path) else {
             return UserScriptConfig::default();
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        let Ok(Value::Object(raw)) = serde_json::from_str::<Value>(&text) else {
+            return UserScriptConfig::default();
+        };
+        config_from_object(&raw)
     }
 
     pub fn save_config(&self, config: &UserScriptConfig) -> anyhow::Result<()> {
+        let _guard = self.config_lock.lock().unwrap();
+        self.save_config_unlocked(config)
+    }
+
+    fn save_config_unlocked(&self, config: &UserScriptConfig) -> anyhow::Result<()> {
         if let Some(parent) = self.config_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
@@ -59,25 +73,25 @@ impl UserScriptManager {
                 )
             })?;
         }
-        fs::write(&self.config_path, serde_json::to_string_pretty(config)?).with_context(|| {
-            format!(
-                "failed to write user script config {}",
-                self.config_path.display()
-            )
-        })
+        crate::settings::atomic_write(
+            &self.config_path,
+            serde_json::to_string_pretty(config)?.as_bytes(),
+        )
     }
 
     pub fn set_global_enabled(&self, enabled: bool) -> anyhow::Result<UserScriptConfig> {
-        let mut config = self.load_config();
+        let _guard = self.config_lock.lock().unwrap();
+        let mut config = self.load_config_unlocked();
         config.enabled = enabled;
-        self.save_config(&config)?;
+        self.save_config_unlocked(&config)?;
         Ok(config)
     }
 
     pub fn set_script_enabled(&self, key: &str, enabled: bool) -> anyhow::Result<UserScriptConfig> {
-        let mut config = self.load_config();
+        let _guard = self.config_lock.lock().unwrap();
+        let mut config = self.load_config_unlocked();
         config.scripts.insert(key.to_string(), enabled);
-        self.save_config(&config)?;
+        self.save_config_unlocked(&config)?;
         Ok(config)
     }
 
@@ -216,6 +230,17 @@ fn wrap_script(script: &UserScriptFile, source: &str) -> String {
     )
 }
 
-fn default_enabled() -> bool {
-    true
+fn config_from_object(raw: &Map<String, Value>) -> UserScriptConfig {
+    let enabled = raw.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let scripts = raw
+        .get("scripts")
+        .and_then(Value::as_object)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|(key, value)| Some((key.clone(), value.as_bool()?)))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    UserScriptConfig { enabled, scripts }
 }

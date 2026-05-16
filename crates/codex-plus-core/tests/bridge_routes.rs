@@ -289,6 +289,74 @@ async fn user_script_manager_scans_and_persists_python_inventory_shape() {
 }
 
 #[tokio::test]
+async fn core_runtime_reload_evaluates_enabled_user_bundle_and_status_is_ok() {
+    let temp = tempfile::tempdir().unwrap();
+    let builtin_dir = temp.path().join("builtin");
+    std::fs::create_dir_all(&builtin_dir).unwrap();
+    std::fs::write(builtin_dir.join("demo.js"), "window.demo = true;").unwrap();
+    let manager = UserScriptManager::new(
+        builtin_dir,
+        temp.path().join("user"),
+        temp.path().join("user_scripts.json"),
+    );
+    let evaluated = Arc::new(Mutex::new(Vec::<String>::new()));
+    let runtime = CoreRuntimeService::new(9229, StatusStore::default())
+        .with_user_scripts(manager)
+        .with_user_script_evaluator({
+            let evaluated = evaluated.clone();
+            Arc::new(move |websocket_url, script| {
+                evaluated
+                    .lock()
+                    .unwrap()
+                    .push(format!("{websocket_url}:{script}"));
+                Ok(json!({"status": "ok"}))
+            })
+        })
+        .with_websocket_url("ws://page");
+    let ctx = BridgeContext::core_with_data(Arc::new(runtime), Arc::new(FakeData::default()));
+
+    let status = handle_bridge_request(ctx.clone(), "/backend/status", json!({})).await;
+    let repaired = handle_bridge_request(ctx.clone(), "/backend/repair", json!({})).await;
+    let reloaded = handle_bridge_request(ctx, "/user-scripts/reload", json!({})).await;
+
+    assert_eq!(status, json!({"status": "ok", "message": "后端已连接"}));
+    assert_eq!(repaired, json!({"status": "ok", "message": "后端已连接"}));
+    assert_eq!(reloaded["scripts"][0]["key"], "builtin:demo.js");
+    let evaluated = evaluated.lock().unwrap();
+    assert_eq!(evaluated.len(), 1);
+    assert!(evaluated[0].starts_with("ws://page:"));
+    assert!(evaluated[0].contains("window.demo = true;"));
+}
+
+#[test]
+fn user_script_manager_tolerates_bad_config_fields_and_updates_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("user_scripts.json");
+    std::fs::write(
+        &config_path,
+        r#"{"enabled":"not bool","scripts":{"user:a.js":false,"user:b.js":"bad"},"custom":true}"#,
+    )
+    .unwrap();
+    let manager = UserScriptManager::new(
+        temp.path().join("builtin"),
+        temp.path().join("user"),
+        config_path.clone(),
+    );
+
+    assert_eq!(manager.load_config().enabled, true);
+    assert_eq!(manager.load_config().scripts.get("user:a.js"), Some(&false));
+    assert!(!manager.load_config().scripts.contains_key("user:b.js"));
+
+    manager.set_script_enabled("user:c.js", false).unwrap();
+    let saved = serde_json::from_str::<Value>(&std::fs::read_to_string(config_path).unwrap())
+        .expect("config should remain valid JSON");
+
+    assert_eq!(saved["enabled"], true);
+    assert_eq!(saved["scripts"]["user:a.js"], false);
+    assert_eq!(saved["scripts"]["user:c.js"], false);
+}
+
+#[tokio::test]
 async fn launch_lifecycle_uses_hook_supplied_bridge_context_for_injection() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");

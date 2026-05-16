@@ -125,6 +125,14 @@ pub async fn install_bridge(
                 json!({ "source": script }),
             )
             .await?;
+        let message_id = next_message_id();
+        session
+            .send_command(
+                message_id,
+                "Runtime.evaluate",
+                runtime_evaluate_params(script),
+            )
+            .await?;
     }
 
     loop {

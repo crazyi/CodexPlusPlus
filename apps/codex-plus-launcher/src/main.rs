@@ -4,17 +4,18 @@ use anyhow::Result;
 use codex_plus_core::launcher::{
     DefaultLaunchHooks, LaunchHooks, LaunchOptions, launch_and_inject_with_hooks,
 };
-use codex_plus_core::models::{DeleteResult, DeleteStatus, ExportResult, SessionRef};
-use codex_plus_core::routes::{BridgeContext, BridgeDataService, CoreRuntimeService};
+use codex_plus_core::models::{DeleteResult, ExportResult, SessionRef};
+use codex_plus_core::routes::{BridgeContext, BridgeDataService, BridgeRuntimeService};
 use codex_plus_core::user_scripts::UserScriptManager;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct LauncherHooks {
     core: Arc<DefaultLaunchHooks>,
     data: Arc<LauncherDataService>,
+    runtime: Arc<LauncherRuntimeService>,
 }
 
 impl Default for LauncherHooks {
@@ -22,6 +23,10 @@ impl Default for LauncherHooks {
         Self {
             core: Arc::new(DefaultLaunchHooks::default()),
             data: Arc::new(LauncherDataService::default()),
+            runtime: Arc::new(LauncherRuntimeService::new(
+                9229,
+                default_user_script_manager(),
+            )),
         }
     }
 }
@@ -75,11 +80,9 @@ impl LaunchHooks for LauncherHooks {
     }
 
     async fn bridge_context(&self, debug_port: u16) -> anyhow::Result<Option<BridgeContext>> {
-        let runtime =
-            CoreRuntimeService::new(debug_port, codex_plus_core::status::StatusStore::default())
-                .with_user_scripts(default_user_script_manager());
+        self.runtime.set_debug_port(debug_port);
         Ok(Some(BridgeContext::core_with_data(
-            Arc::new(runtime),
+            self.runtime.clone(),
             self.data.clone(),
         )))
     }
@@ -90,7 +93,7 @@ impl LaunchHooks for LauncherHooks {
         helper_port: u16,
         ctx: BridgeContext,
     ) -> anyhow::Result<()> {
-        inject_with_context(debug_port, helper_port, ctx).await
+        inject_with_context(debug_port, helper_port, ctx, self.runtime.clone()).await
     }
 
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
@@ -119,7 +122,7 @@ impl LaunchHooks for LauncherHooks {
 
 #[derive(Debug, Clone)]
 struct LauncherDataService {
-    db_path: Option<PathBuf>,
+    db_path: PathBuf,
     backup_dir: PathBuf,
 }
 
@@ -135,37 +138,22 @@ impl Default for LauncherDataService {
 #[async_trait::async_trait]
 impl BridgeDataService for LauncherDataService {
     async fn delete(&self, session: SessionRef) -> anyhow::Result<DeleteResult> {
-        let Some(adapter) = self.storage_adapter() else {
-            return Ok(DeleteResult {
-                status: DeleteStatus::Failed,
-                session_id: session.session_id,
-                message: "No local database configured".to_string(),
-                undo_token: None,
-                backup_path: None,
-            });
-        };
+        let adapter = self.storage_adapter();
         tokio::task::spawn_blocking(move || adapter.delete_local(&session))
             .await
             .map_err(|error| anyhow::anyhow!("delete task failed: {error}"))
     }
 
     async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult> {
-        let Some(adapter) = self.storage_adapter() else {
-            return Ok(DeleteResult {
-                status: DeleteStatus::Failed,
-                session_id: String::new(),
-                message: "No local backup adapter configured".to_string(),
-                undo_token: Some(undo_token),
-                backup_path: None,
-            });
-        };
+        let adapter = self.storage_adapter();
         tokio::task::spawn_blocking(move || adapter.undo(&undo_token))
             .await
             .map_err(|error| anyhow::anyhow!("undo task failed: {error}"))
     }
 
     async fn export_markdown(&self, session: SessionRef) -> anyhow::Result<ExportResult> {
-        let export_service = codex_plus_data::MarkdownExportService::new(self.db_path.clone());
+        let export_service =
+            codex_plus_data::MarkdownExportService::new(Some(self.db_path.clone()));
         tokio::task::spawn_blocking(move || export_service.export(&session))
             .await
             .map_err(|error| anyhow::anyhow!("export markdown task failed: {error}"))
@@ -175,9 +163,7 @@ impl BridgeDataService for LauncherDataService {
         &self,
         title: String,
     ) -> anyhow::Result<Option<SessionRef>> {
-        let Some(adapter) = self.storage_adapter() else {
-            return Ok(None);
-        };
+        let adapter = self.storage_adapter();
         tokio::task::spawn_blocking(move || adapter.find_archived_thread_by_title(&title))
             .await
             .map_err(|error| anyhow::anyhow!("archived lookup task failed: {error}"))
@@ -188,13 +174,7 @@ impl BridgeDataService for LauncherDataService {
         session: SessionRef,
         target_cwd: String,
     ) -> anyhow::Result<Value> {
-        let Some(adapter) = self.storage_adapter() else {
-            return Ok(json!({
-                "status": "failed",
-                "session_id": session.session_id,
-                "message": "No local database configured"
-            }));
-        };
+        let adapter = self.storage_adapter();
         tokio::task::spawn_blocking(move || {
             adapter.move_codex_thread_workspace(&session, &target_cwd)
         })
@@ -203,26 +183,14 @@ impl BridgeDataService for LauncherDataService {
     }
 
     async fn thread_sort_key(&self, session: SessionRef) -> anyhow::Result<Value> {
-        let Some(adapter) = self.storage_adapter() else {
-            return Ok(json!({
-                "status": "failed",
-                "session_id": session.session_id,
-                "message": "No local database configured"
-            }));
-        };
+        let adapter = self.storage_adapter();
         tokio::task::spawn_blocking(move || adapter.codex_thread_sort_key(&session))
             .await
             .map_err(|error| anyhow::anyhow!("thread sort key task failed: {error}"))
     }
 
     async fn thread_sort_keys(&self, sessions: Vec<SessionRef>) -> anyhow::Result<Value> {
-        let Some(adapter) = self.storage_adapter() else {
-            return Ok(json!({
-                "status": "failed",
-                "message": "No local database configured",
-                "sort_keys": []
-            }));
-        };
+        let adapter = self.storage_adapter();
         tokio::task::spawn_blocking(move || adapter.codex_thread_sort_keys(&sessions))
             .await
             .map_err(|error| anyhow::anyhow!("thread sort keys task failed: {error}"))
@@ -230,11 +198,80 @@ impl BridgeDataService for LauncherDataService {
 }
 
 impl LauncherDataService {
-    fn storage_adapter(&self) -> Option<codex_plus_data::SQLiteStorageAdapter> {
-        Some(codex_plus_data::SQLiteStorageAdapter::new(
-            self.db_path.clone()?,
+    fn storage_adapter(&self) -> codex_plus_data::SQLiteStorageAdapter {
+        codex_plus_data::SQLiteStorageAdapter::new(
+            self.db_path.clone(),
             codex_plus_data::BackupStore::new(self.backup_dir.clone()),
-        ))
+        )
+    }
+}
+
+struct LauncherRuntimeService {
+    debug_port: Mutex<u16>,
+    websocket_url: Mutex<Option<String>>,
+    user_scripts: UserScriptManager,
+}
+
+impl LauncherRuntimeService {
+    fn new(debug_port: u16, user_scripts: UserScriptManager) -> Self {
+        Self {
+            debug_port: Mutex::new(debug_port),
+            websocket_url: Mutex::new(None),
+            user_scripts,
+        }
+    }
+
+    fn set_debug_port(&self, debug_port: u16) {
+        *self.debug_port.lock().unwrap() = debug_port;
+    }
+
+    fn set_websocket_url(&self, websocket_url: &str) {
+        *self.websocket_url.lock().unwrap() = Some(websocket_url.to_string());
+    }
+}
+
+#[async_trait::async_trait]
+impl BridgeRuntimeService for LauncherRuntimeService {
+    async fn user_script_inventory(&self) -> anyhow::Result<Value> {
+        self.user_scripts.inventory()
+    }
+
+    async fn set_user_scripts_enabled(&self, enabled: bool) -> anyhow::Result<Value> {
+        self.user_scripts.set_global_enabled(enabled)?;
+        self.user_scripts.inventory()
+    }
+
+    async fn set_user_script_enabled(&self, key: String, enabled: bool) -> anyhow::Result<Value> {
+        self.user_scripts.set_script_enabled(&key, enabled)?;
+        self.user_scripts.inventory()
+    }
+
+    async fn reload_user_scripts(&self) -> anyhow::Result<Value> {
+        let bundle = self.user_scripts.build_enabled_bundle()?;
+        let websocket_url = self.websocket_url.lock().unwrap().clone();
+        if let Some(websocket_url) = websocket_url.filter(|_| !bundle.trim().is_empty()) {
+            codex_plus_core::bridge::evaluate_script(&websocket_url, &bundle).await?;
+        }
+        self.user_scripts.inventory()
+    }
+
+    async fn open_devtools(&self) -> anyhow::Result<Value> {
+        Ok(json!({
+            "status": "ok",
+            "debug_port": *self.debug_port.lock().unwrap()
+        }))
+    }
+
+    async fn backend_status(&self) -> anyhow::Result<Value> {
+        Ok(json!({"status": "ok", "message": "后端已连接"}))
+    }
+
+    async fn repair_backend(&self) -> anyhow::Result<Value> {
+        self.backend_status().await
+    }
+
+    async fn ads(&self) -> anyhow::Result<Value> {
+        Ok(json!({"version": 1, "ads": []}))
     }
 }
 
@@ -242,6 +279,7 @@ async fn inject_with_context(
     debug_port: u16,
     helper_port: u16,
     ctx: BridgeContext,
+    runtime: Arc<LauncherRuntimeService>,
 ) -> anyhow::Result<()> {
     let targets = codex_plus_core::cdp::list_targets(debug_port).await?;
     let target = codex_plus_core::cdp::pick_page_target(&targets)?;
@@ -249,8 +287,10 @@ async fn inject_with_context(
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
+    runtime.set_websocket_url(websocket_url);
     let script = codex_plus_core::assets::injection_script(helper_port);
-    let user_bundle = default_user_script_manager()
+    let user_bundle = runtime
+        .user_scripts
         .build_enabled_bundle()
         .unwrap_or_default();
     let new_document_scripts = if user_bundle.is_empty() {
@@ -272,12 +312,12 @@ async fn inject_with_context(
     .await
 }
 
-fn default_codex_db_path() -> Option<PathBuf> {
-    let path = directories::BaseDirs::new()?
-        .home_dir()
+fn default_codex_db_path() -> PathBuf {
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
         .join(".codex")
-        .join("state_5.sqlite");
-    path.exists().then_some(path)
+        .join("state_5.sqlite")
 }
 
 fn default_user_script_manager() -> UserScriptManager {
