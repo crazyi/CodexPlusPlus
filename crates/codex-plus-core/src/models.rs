@@ -52,8 +52,8 @@ pub struct ExportResult {
     pub status: ExportStatus,
     pub session_id: String,
     pub message: String,
-    pub filename: String,
-    pub markdown: String,
+    pub filename: Option<String>,
+    pub markdown: Option<String>,
 }
 
 #[cfg(test)]
@@ -139,8 +139,8 @@ mod tests {
             status: ExportStatus::Exported,
             session_id: "session-123".to_string(),
             message: "exported markdown".to_string(),
-            filename: "session-123.md".to_string(),
-            markdown: "# Session\n\nBody".to_string(),
+            filename: Some("session-123.md".to_string()),
+            markdown: Some("# Session\n\nBody".to_string()),
         };
 
         let value = serde_json::to_value(&result).unwrap();
@@ -159,5 +159,20 @@ mod tests {
             serde_json::from_value::<ExportResult>(value).unwrap(),
             result
         );
+    }
+
+    #[test]
+    fn failed_export_result_accepts_null_filename_and_markdown() {
+        let value = json!({
+            "status": "failed",
+            "session_id": "s1",
+            "message": "err",
+            "filename": null,
+            "markdown": null
+        });
+
+        let result = serde_json::from_value::<ExportResult>(value.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(result).unwrap(), value);
     }
 }

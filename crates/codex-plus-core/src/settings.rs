@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BackendSettings {
@@ -86,31 +86,72 @@ impl SettingsStore {
     }
 
     pub fn update(&self, payload: Value) -> anyhow::Result<BackendSettings> {
-        let mut settings = self.load()?;
-        if let Value::Object(map) = payload {
-            if let Some(value) = map.get("providerSyncEnabled").and_then(Value::as_bool) {
-                settings.provider_sync_enabled = value;
-            }
-            if let Some(value) = map.get("cliWrapperEnabled").and_then(Value::as_bool) {
-                settings.cli_wrapper_enabled = value;
-            }
-            if let Some(value) = map.get("cliWrapperBaseUrl").and_then(Value::as_str) {
-                settings.cli_wrapper_base_url = value.to_string();
-            }
-            if let Some(value) = map.get("cliWrapperApiKey").and_then(Value::as_str) {
-                settings.cli_wrapper_api_key = value.to_string();
-            }
-            if let Some(value) = map.get("cliWrapperApiKeyEnv").and_then(Value::as_str) {
-                settings.cli_wrapper_api_key_env = if value.is_empty() {
-                    default_api_key_env()
-                } else {
-                    value.to_string()
-                };
-            }
-        }
+        let Value::Object(payload) = payload else {
+            return self.load();
+        };
 
-        self.save(&settings)?;
+        let mut raw = self.load_raw_object()?;
+        merge_known_setting_fields(&mut raw, &payload);
+        let settings = serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default();
+        let bytes = serde_json::to_vec_pretty(&Value::Object(raw))?;
+        atomic_write(&self.path, &bytes)?;
         Ok(settings)
+    }
+
+    fn load_raw_object(&self) -> anyhow::Result<Map<String, Value>> {
+        let contents = match fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(settings_to_object(&BackendSettings::default()));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read settings {}", self.path.display()));
+            }
+        };
+
+        match serde_json::from_str::<Value>(&contents) {
+            Ok(Value::Object(map)) => Ok(map),
+            Ok(_) | Err(_) => Ok(settings_to_object(&BackendSettings::default())),
+        }
+    }
+}
+
+fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<String, Value>) {
+    if let Some(value) = source.get("providerSyncEnabled").and_then(Value::as_bool) {
+        target.insert("providerSyncEnabled".to_string(), Value::Bool(value));
+    }
+    if let Some(value) = source.get("cliWrapperEnabled").and_then(Value::as_bool) {
+        target.insert("cliWrapperEnabled".to_string(), Value::Bool(value));
+    }
+    if let Some(value) = source.get("cliWrapperBaseUrl").and_then(Value::as_str) {
+        target.insert(
+            "cliWrapperBaseUrl".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    if let Some(value) = source.get("cliWrapperApiKey").and_then(Value::as_str) {
+        target.insert(
+            "cliWrapperApiKey".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    if let Some(value) = source.get("cliWrapperApiKeyEnv").and_then(Value::as_str) {
+        target.insert(
+            "cliWrapperApiKeyEnv".to_string(),
+            Value::String(if value.is_empty() {
+                default_api_key_env()
+            } else {
+                value.to_string()
+            }),
+        );
+    }
+}
+
+fn settings_to_object(settings: &BackendSettings) -> Map<String, Value> {
+    match serde_json::to_value(settings).unwrap_or_else(|_| Value::Object(Map::new())) {
+        Value::Object(map) => map,
+        _ => Map::new(),
     }
 }
 
@@ -244,5 +285,42 @@ mod tests {
         assert_eq!(updated.cli_wrapper_api_key, "old-key");
         assert_eq!(updated.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(store.load().unwrap(), updated);
+    }
+
+    #[test]
+    fn settings_store_update_preserves_existing_unknown_fields() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        std::fs::write(
+            &path,
+            r#"{"providerSyncEnabled":false,"customField":{"nested":true}}"#,
+        )
+        .unwrap();
+
+        let updated = store
+            .update(json!({
+                "providerSyncEnabled": true
+            }))
+            .unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert!(updated.provider_sync_enabled);
+        assert_eq!(saved["providerSyncEnabled"], json!(true));
+        assert_eq!(saved["customField"], json!({"nested": true}));
+    }
+
+    #[test]
+    fn settings_store_update_with_non_object_payload_does_not_write_file() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let original = r#"{"providerSyncEnabled":false,"customField":"keep me"}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let updated = store.update(json!(null)).unwrap();
+
+        assert!(!updated.provider_sync_enabled);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 }
